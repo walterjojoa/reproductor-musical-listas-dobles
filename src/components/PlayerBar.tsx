@@ -1,5 +1,4 @@
 import type { RepeatMode, Song } from '../lib/Playlist'
-import { isLocalTrack } from '../lib/localFiles'
 import { formatTime } from '../lib/time'
 import { Cover } from './Cover'
 
@@ -18,6 +17,8 @@ interface Props {
   repeat: RepeatMode
   liked: boolean
   hasSongs: boolean
+  /** Suena la canción completa (YouTube o MP3), no la vista previa. */
+  fullSong: boolean
   onToggle: () => void
   onNext: () => void
   onPrevious: () => void
@@ -29,7 +30,7 @@ interface Props {
 }
 
 export function PlayerBar(props: Props) {
-  const { current, isPlaying, elapsed, duration, volume, repeat, liked, hasSongs } = props
+  const { current, isPlaying, elapsed, duration, volume, repeat, liked, hasSongs, fullSong } = props
   const max = duration || 30
 
   return (
@@ -99,7 +100,7 @@ export function PlayerBar(props: Props) {
       </div>
 
       <div className="player-right">
-        <small className="muted">{current ? (isLocalTrack(current) ? 'Canción completa' : 'Vista previa 30 s') : ''}</small>
+        <small className="muted">{current ? (fullSong ? 'Canción completa' : 'Vista previa 30 s') : ''}</small>
         <span aria-hidden>{volume === 0 ? '🔇' : '🔊'}</span>
         <input
           type="range"

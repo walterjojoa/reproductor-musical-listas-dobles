@@ -9,6 +9,15 @@ import { fileToTrack, isLocalTrack } from './lib/localFiles'
 import { Playlist, type RepeatMode, type Song, type Track } from './lib/Playlist'
 import { load, save } from './lib/storage'
 import { formatTime } from './lib/time'
+import {
+  YOUTUBE_KEY,
+  YT_ENDED,
+  YT_PAUSED,
+  YT_PLAYING,
+  findVideoId,
+  loadYouTubeApi,
+  type YTPlayer,
+} from './lib/youtube'
 
 const SUGGESTIONS = ['Shakira', 'Karol G', 'Bad Bunny', 'Carlos Vives', 'Queen', 'Coldplay', 'Feid', 'Taylor Swift']
 const NEXT_REPEAT: Record<RepeatMode, RepeatMode> = { off: 'all', all: 'one', one: 'off' }
@@ -65,9 +74,26 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
 
+  // Motor de reproducción: 'youtube' (canción completa) o 'audio' (vista previa o MP3 subido).
+  const [engine, setEngine] = useState<'audio' | 'youtube'>('audio')
+  const [ytReady, setYtReady] = useState(false)
+  const [videoLoading, setVideoLoading] = useState(false)
+  const ytRef = useRef<YTPlayer | null>(null)
+  const ytHostRef = useRef<HTMLDivElement>(null)
+
   const currentNode = playlist.current
   const current = currentNode?.value ?? null
   const queue = [...playlist.songs.nodes()]
+
+  // Los eventos de YouTube llegan fuera de React: estas refs siempre apuntan a lo último.
+  const isPlayingRef = useRef(isPlaying)
+  isPlayingRef.current = isPlaying
+  const volumeRef = useRef(volume)
+  volumeRef.current = volume
+  const handleEndedRef = useRef(handleEnded)
+  handleEndedRef.current = handleEnded
+  const fallbackRef = useRef(fallbackToPreview)
+  fallbackRef.current = fallbackToPreview
 
   // ---------- Guardado ----------
   // Las canciones subidas no se guardan: su audio solo existe mientras la página está abierta.
@@ -88,6 +114,7 @@ export default function App() {
   useEffect(() => {
     save(VOLUME_KEY, volume)
     if (audioRef.current) audioRef.current.volume = volume
+    ytRef.current?.setVolume(volume * 100)
   }, [volume])
 
   useEffect(() => {
@@ -126,19 +153,129 @@ export default function App() {
     }
   }, [query])
 
-  // ---------- Audio ----------
+  // ---------- Reproductor de YouTube (se crea una sola vez) ----------
+  useEffect(() => {
+    if (!YOUTUBE_KEY || !ytHostRef.current) return
+    let cancelled = false
+    let player: YTPlayer | null = null
+    const element = document.createElement('div')
+    ytHostRef.current.append(element)
+
+    loadYouTubeApi()
+      .then((YT) => {
+        if (cancelled) return
+        player = new YT.Player(element, {
+          width: '100%',
+          height: '100%',
+          playerVars: { playsinline: 1, rel: 0, modestbranding: 1 },
+          events: {
+            onReady: () => {
+              ytRef.current = player
+              player?.setVolume(volumeRef.current * 100)
+              setYtReady(true)
+            },
+            onStateChange: ({ data }) => {
+              if (data === YT_ENDED) handleEndedRef.current()
+              else if (data === YT_PLAYING) setIsPlaying(true)
+              else if (data === YT_PAUSED) setIsPlaying(false)
+            },
+            onError: () => fallbackRef.current('Esta canción no se puede ver en YouTube'),
+          },
+        })
+      })
+      .catch(() => setToast('No se pudo cargar YouTube; sonarán las vistas previas'))
+
+    return () => {
+      cancelled = true
+      ytRef.current = null
+      setYtReady(false)
+      player?.destroy()
+      element.remove()
+    }
+  }, [])
+
+  // ---------- Elegir de dónde suena la canción actual ----------
   useEffect(() => {
     const audio = audioRef.current
     if (!audio) return
     if (!current) {
       audio.pause()
       audio.removeAttribute('src')
+      ytRef.current?.stopVideo()
+      setEngine('audio')
       return
     }
+
+    if (!ytReady || isLocalTrack(current)) {
+      ytRef.current?.stopVideo()
+      setEngine('audio')
+      if (audio.src !== current.previewUrl) audio.src = current.previewUrl
+      if (isPlayingRef.current) audio.play().catch(() => setIsPlaying(false))
+      return
+    }
+
+    let cancelled = false
+    audio.pause()
+    setEngine('youtube')
+    setVideoLoading(true)
+    findVideoId(current)
+      .then((videoId) => {
+        if (cancelled) return
+        if (!videoId) return fallbackToPreview('No se encontró la canción completa')
+        setElapsed(0)
+        setDuration(current.duration)
+        if (isPlayingRef.current) ytRef.current?.loadVideoById(videoId)
+        else ytRef.current?.cueVideoById(videoId)
+      })
+      .catch(() => {
+        if (!cancelled) fallbackToPreview('YouTube no respondió (¿límite diario de la clave?)')
+      })
+      .finally(() => {
+        if (!cancelled) setVideoLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [current, ytReady])
+
+  // ---------- Play / pausa ----------
+  useEffect(() => {
+    const audio = audioRef.current
+    if (!audio || !current) return
+    if (engine === 'youtube') {
+      audio.pause()
+      if (isPlaying) ytRef.current?.playVideo()
+      else ytRef.current?.pauseVideo()
+    } else if (isPlaying) {
+      audio.play().catch(() => setIsPlaying(false))
+    } else {
+      audio.pause()
+    }
+  }, [isPlaying, engine, current])
+
+  // YouTube no avisa el progreso: se consulta cada medio segundo.
+  useEffect(() => {
+    if (engine !== 'youtube') return
+    const timer = setInterval(() => {
+      const player = ytRef.current
+      if (!player) return
+      setElapsed(player.getCurrentTime() || 0)
+      const length = player.getDuration()
+      if (length) setDuration(length)
+    }, 500)
+    return () => clearInterval(timer)
+  }, [engine])
+
+  /** Si YouTube falla, suena la vista previa de 30 s de iTunes. */
+  function fallbackToPreview(reason: string) {
+    const audio = audioRef.current
+    if (!audio || !current) return
+    ytRef.current?.stopVideo()
+    setEngine('audio')
     if (audio.src !== current.previewUrl) audio.src = current.previewUrl
-    if (isPlaying) audio.play().catch(() => setIsPlaying(false))
-    else audio.pause()
-  }, [current, isPlaying])
+    if (isPlayingRef.current) audio.play().catch(() => setIsPlaying(false))
+    setToast(`${reason}: suena la vista previa`)
+  }
 
   // Título, artista y portada en los controles del sistema (teclado multimedia, celular).
   useEffect(() => {
@@ -174,7 +311,8 @@ export default function App() {
 
   function restart() {
     setElapsed(0)
-    if (audioRef.current) audioRef.current.currentTime = 0
+    if (engine === 'youtube') ytRef.current?.seekTo(0, true)
+    else if (audioRef.current) audioRef.current.currentTime = 0
   }
 
   // ---------- Controles ----------
@@ -190,8 +328,9 @@ export default function App() {
   }
 
   function goNext() {
+    const before = playlist.current
     if (playlist.next()) {
-      restart()
+      afterSongChange(before)
       changed()
     } else {
       setToast('Es la última canción · activa 🔁 para volver al inicio')
@@ -201,8 +340,9 @@ export default function App() {
   function goPrevious() {
     // Como en los reproductores reales: después de 3 s, "anterior" reinicia la canción.
     if (elapsed > 3) return restart()
+    const before = playlist.current
     if (playlist.previous()) {
-      restart()
+      afterSongChange(before)
       changed()
     } else {
       setToast('Es la primera canción')
@@ -210,22 +350,33 @@ export default function App() {
   }
 
   function handleEnded() {
+    const before = playlist.current
     const action = playlist.onSongEnd()
-    if (action === 'restart') {
-      restart()
-      audioRef.current?.play().catch(() => setIsPlaying(false))
-    } else if (action === 'next') {
-      restart()
-    } else {
+    if (action === 'stop') {
       setIsPlaying(false)
       restart()
+    } else {
+      afterSongChange(before)
+      // La misma canción otra vez (repetir canción o lista de una sola): hay que darle play.
+      if (playlist.current === before) {
+        if (engine === 'youtube') ytRef.current?.playVideo()
+        else audioRef.current?.play().catch(() => setIsPlaying(false))
+      }
     }
     changed()
   }
 
+  /** Tras moverse en la lista: si sigue el mismo nodo se reinicia; si cambió, el nuevo empieza en 0. */
+  function afterSongChange(before: typeof playlist.current) {
+    if (playlist.current === before) return restart()
+    setElapsed(0)
+    if (engine === 'audio' && audioRef.current) audioRef.current.currentTime = 0
+  }
+
   function seek(seconds: number) {
     setElapsed(seconds)
-    if (audioRef.current) audioRef.current.currentTime = seconds
+    if (engine === 'youtube') ytRef.current?.seekTo(seconds, true)
+    else if (audioRef.current) audioRef.current.currentTime = seconds
   }
 
   function cycleRepeat() {
@@ -247,8 +398,9 @@ export default function App() {
     else playlist.add(song, where)
 
     if (where === 'now') {
+      const before = playlist.current
       playlist.select(song.id)
-      restart()
+      afterSongChange(before)
       setIsPlaying(true)
     }
     const label =
@@ -267,16 +419,18 @@ export default function App() {
 
   function playSong(song: Song) {
     if (song === current) return togglePlay()
+    const before = playlist.current
     playlist.select(song.id)
-    restart()
+    afterSongChange(before)
     setIsPlaying(true)
     changed()
   }
 
   function removeSong(song: Song) {
+    const before = playlist.current
     playlist.remove(song.id)
     if (song === current) {
-      restart()
+      afterSongChange(before)
       if (!playlist.current) setIsPlaying(false)
     }
     setToast(`Eliminada: ${song.title}`)
@@ -394,6 +548,12 @@ export default function App() {
               <p className="muted">
                 Busca cualquier canción y agrégala a tu lista al inicio, al final o en la posición que quieras.
               </p>
+              {!YOUTUBE_KEY && (
+                <p className="notice">
+                  Las canciones del buscador suenan 30 s. Para escucharlas completas agrega la clave de YouTube
+                  (<code>VITE_YOUTUBE_API_KEY</code>, ver README).
+                </p>
+              )}
               <div className="chips">
                 {SUGGESTIONS.map((term) => (
                   <button key={term} className="chip" onClick={() => setQuery(term)}>
@@ -476,6 +636,12 @@ export default function App() {
         </section>
 
         <aside className="panel queue">
+          {/* El reproductor de YouTube debe estar siempre montado; solo se muestra cuando suena por YouTube. */}
+          <div className={`now-video${engine === 'youtube' && current ? ' visible' : ''}`}>
+            <div ref={ytHostRef} className="yt-host" />
+            {videoLoading && <div className="video-loading">Buscando la canción completa…</div>}
+          </div>
+
           <div className="queue-head">
             <div>
               <h2>Tu lista</h2>
@@ -554,6 +720,7 @@ export default function App() {
         repeat={playlist.repeat}
         liked={!!(current && liked[current.trackId])}
         hasSongs={playlist.size > 0}
+        fullSong={!!current && (engine === 'youtube' || isLocalTrack(current))}
         onToggle={togglePlay}
         onNext={goNext}
         onPrevious={goPrevious}
