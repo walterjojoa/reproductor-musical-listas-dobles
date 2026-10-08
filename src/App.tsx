@@ -1,480 +1,501 @@
-import { Fragment, useEffect, useReducer, useRef, useState, type CSSProperties, type FormEvent } from 'react'
-import { createSampleSongs } from './data/sampleSongs'
-import { Playlist, type Position, type RepeatMode, type Song } from './lib/Playlist'
-import { formatTime, parseTime } from './lib/time'
+import { useEffect, useReducer, useRef, useState } from 'react'
+import type { AddWhere } from './components/AddMenu'
+import { ListDiagram } from './components/ListDiagram'
+import { PlayerBar } from './components/PlayerBar'
+import { TrackRow } from './components/TrackRow'
+import { searchTracks } from './lib/itunes'
+import { Playlist, type RepeatMode, type Song, type Track } from './lib/Playlist'
+import { load, save } from './lib/storage'
+import { formatTime } from './lib/time'
 
-const COLORS = ['#e0533d', '#d9a03f', '#3fb6d9', '#8c5ad9', '#d94f8c', '#4fd98a', '#5a7bd9']
-const REPEAT_LABEL: Record<RepeatMode, string> = {
-  off: 'Sin repetir',
-  all: 'Repetir lista',
-  one: 'Repetir canción',
-}
+const SUGGESTIONS = ['Shakira', 'Karol G', 'Bad Bunny', 'Carlos Vives', 'Queen', 'Coldplay', 'Feid', 'Taylor Swift']
 const NEXT_REPEAT: Record<RepeatMode, RepeatMode> = { off: 'all', all: 'one', one: 'off' }
+const QUEUE_KEY = 'sonora:queue'
+const LIKED_KEY = 'sonora:liked'
+const VOLUME_KEY = 'sonora:volume'
+
+interface SavedQueue {
+  songs: Song[]
+  currentId: string | null
+  repeat: RepeatMode
+}
 
 let idCounter = 0
-const newId = () => `u${Date.now().toString(36)}${idCounter++}`
+const newId = () => `${Date.now().toString(36)}-${idCounter++}`
 
-function createPlaylist(): Playlist {
+/** Reconstruye la lista doble con lo que quedó guardado en el navegador. */
+function restorePlaylist(): Playlist {
   const playlist = new Playlist()
-  for (const song of createSampleSongs()) playlist.add(song, 'end')
+  const saved = load<SavedQueue | null>(QUEUE_KEY, null)
+  if (saved && Array.isArray(saved.songs)) {
+    for (const song of saved.songs) playlist.add(song, 'end')
+    if (saved.currentId) playlist.select(saved.currentId)
+    if (saved.repeat) playlist.repeat = saved.repeat
+  }
   return playlist
 }
 
-/** Lee la duración real de un archivo de audio. */
-function readDuration(src: string): Promise<number | null> {
-  return new Promise((resolve) => {
-    const audio = new Audio()
-    audio.preload = 'metadata'
-    audio.onloadedmetadata = () => resolve(Number.isFinite(audio.duration) ? Math.round(audio.duration) : null)
-    audio.onerror = () => resolve(null)
-    audio.src = src
-  })
-}
-
-type Where = 'start' | 'end' | 'index'
+type Tab = 'search' | 'liked'
 
 export default function App() {
-  // La lista doble vive fuera del estado de React; `refresh` vuelve a pintar tras cada cambio.
-  const [playlist] = useState(createPlaylist)
-  const [, refresh] = useReducer((n: number) => n + 1, 0)
+  // La lista doble vive fuera del estado de React; `changed` vuelve a pintar y guarda.
+  const [playlist] = useState(restorePlaylist)
+  const [version, changed] = useReducer((n: number) => n + 1, 0)
+
+  const [tab, setTab] = useState<Tab>('search')
+  // ?q=artista en la URL abre la app con esa búsqueda.
+  const [query, setQuery] = useState(() => new URLSearchParams(location.search).get('q') ?? '')
+  const [results, setResults] = useState<Track[]>([])
+  const [loading, setLoading] = useState(false)
+  const [searchError, setSearchError] = useState<string | null>(null)
+  const [liked, setLiked] = useState<Record<string, Track>>(() => load(LIKED_KEY, {}))
+
   const [isPlaying, setIsPlaying] = useState(false)
   const [elapsed, setElapsed] = useState(0)
-  const [speed, setSpeed] = useState(1)
-  const [query, setQuery] = useState('')
-  const [message, setMessage] = useState<string | null>(null)
+  const [duration, setDuration] = useState(0)
+  const [volume, setVolume] = useState(() => load(VOLUME_KEY, 0.8))
+  const [showDiagram, setShowDiagram] = useState(true)
+  const [confirmClear, setConfirmClear] = useState(false)
+  const [toast, setToast] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
-
-  // Formulario
-  const [title, setTitle] = useState('')
-  const [artist, setArtist] = useState('')
-  const [durationText, setDurationText] = useState('3:30')
-  const [where, setWhere] = useState<Where>('end')
-  const [positionText, setPositionText] = useState('1')
-  const [file, setFile] = useState<File | null>(null)
-  const [formError, setFormError] = useState<string | null>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const currentNode = playlist.current
   const current = currentNode?.value ?? null
-  const nodes = [...playlist.songs.nodes()]
+  const queue = [...playlist.songs.nodes()]
+
+  // ---------- Guardado ----------
+  useEffect(() => {
+    save(QUEUE_KEY, {
+      songs: playlist.songs.toArray(),
+      currentId: playlist.current?.value.id ?? null,
+      repeat: playlist.repeat,
+    } satisfies SavedQueue)
+  }, [version, playlist])
+
+  useEffect(() => save(LIKED_KEY, liked), [liked])
 
   useEffect(() => {
-    if (!message) return
-    const timer = setTimeout(() => setMessage(null), 2500)
+    save(VOLUME_KEY, volume)
+    if (audioRef.current) audioRef.current.volume = volume
+  }, [volume])
+
+  useEffect(() => {
+    if (!toast) return
+    const timer = setTimeout(() => setToast(null), 2500)
     return () => clearTimeout(timer)
-  }, [message])
+  }, [toast])
 
-  // Reproducción simulada (canciones sin archivo de audio).
+  // ---------- Búsqueda (espera 350 ms mientras se escribe) ----------
   useEffect(() => {
-    if (!isPlaying || !current || current.src) return
-    const timer = setInterval(() => setElapsed((value) => value + 1), 1000 / speed)
-    return () => clearInterval(timer)
-  }, [isPlaying, current, speed])
+    const term = query.trim()
+    if (term.length < 2) {
+      setResults([])
+      setSearchError(null)
+      setLoading(false)
+      return
+    }
+    const controller = new AbortController()
+    setLoading(true)
+    const timer = setTimeout(() => {
+      searchTracks(term, controller.signal)
+        .then((tracks) => {
+          setResults(tracks)
+          setSearchError(null)
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) setSearchError('No se pudo buscar. Revisa tu conexión a internet.')
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setLoading(false)
+        })
+    }, 350)
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [query])
 
-  useEffect(() => {
-    if (isPlaying && current && !current.src && elapsed >= current.duration) handleEnd()
-  }, [elapsed])
-
-  // Reproducción real (canciones subidas como archivo).
+  // ---------- Audio ----------
   useEffect(() => {
     const audio = audioRef.current
     if (!audio) return
-    if (current?.src) {
-      if (audio.src !== current.src) audio.src = current.src
-      if (isPlaying) audio.play().catch(() => setIsPlaying(false))
-      else audio.pause()
-    } else {
+    if (!current) {
       audio.pause()
+      audio.removeAttribute('src')
+      return
     }
+    if (audio.src !== current.previewUrl) audio.src = current.previewUrl
+    if (isPlaying) audio.play().catch(() => setIsPlaying(false))
+    else audio.pause()
   }, [current, isPlaying])
 
-  function restartTrack() {
+  // Título, artista y portada en los controles del sistema (teclado multimedia, celular).
+  useEffect(() => {
+    if (!('mediaSession' in navigator) || !current) return
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: current.title,
+      artist: current.artist,
+      album: current.album,
+      artwork: [{ src: current.cover, sizes: '300x300', type: 'image/jpeg' }],
+    })
+  }, [current])
+
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return
+    navigator.mediaSession.setActionHandler('nexttrack', goNext)
+    navigator.mediaSession.setActionHandler('previoustrack', goPrevious)
+  })
+
+  // Atajos: espacio = play/pausa, Shift + → / ← = adelantar / retroceder.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const tag = (event.target as HTMLElement).tagName
+      if (tag === 'INPUT' || tag === 'BUTTON' || tag === 'TEXTAREA') return
+      if (event.code === 'Space') {
+        event.preventDefault()
+        togglePlay()
+      } else if (event.shiftKey && event.key === 'ArrowRight') goNext()
+      else if (event.shiftKey && event.key === 'ArrowLeft') goPrevious()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
+
+  function restart() {
     setElapsed(0)
-    if (audioRef.current && current?.src) audioRef.current.currentTime = 0
+    if (audioRef.current) audioRef.current.currentTime = 0
+  }
+
+  // ---------- Controles ----------
+  function togglePlay() {
+    if (!current) {
+      if (playlist.next()) {
+        setIsPlaying(true)
+        changed()
+      }
+      return
+    }
+    setIsPlaying((value) => !value)
   }
 
   function goNext() {
     if (playlist.next()) {
-      restartTrack()
-      refresh()
+      restart()
+      changed()
     } else {
-      setMessage('Es la última canción (activa "Repetir lista" para volver al inicio)')
+      setToast('Es la última canción · activa 🔁 para volver al inicio')
     }
   }
 
   function goPrevious() {
     // Como en los reproductores reales: después de 3 s, "anterior" reinicia la canción.
-    if (elapsed > 3) {
-      restartTrack()
-      return
-    }
+    if (elapsed > 3) return restart()
     if (playlist.previous()) {
-      restartTrack()
-      refresh()
+      restart()
+      changed()
     } else {
-      setMessage('Es la primera canción')
+      setToast('Es la primera canción')
     }
   }
 
-  function handleEnd() {
+  function handleEnded() {
     const action = playlist.onSongEnd()
     if (action === 'restart') {
-      restartTrack()
+      restart()
       audioRef.current?.play().catch(() => setIsPlaying(false))
     } else if (action === 'next') {
-      restartTrack()
+      restart()
     } else {
       setIsPlaying(false)
-      setElapsed(0)
+      restart()
     }
-    refresh()
-  }
-
-  function togglePlay() {
-    if (!current) return
-    setIsPlaying((value) => !value)
-  }
-
-  function playSong(song: Song) {
-    if (song === current) {
-      togglePlay()
-      return
-    }
-    playlist.select(song.id)
-    restartTrack()
-    setIsPlaying(true)
-    refresh()
-  }
-
-  function removeSong(song: Song) {
-    const wasCurrent = song === current
-    playlist.remove(song.id)
-    if (wasCurrent) {
-      setElapsed(0)
-      if (!playlist.current) setIsPlaying(false)
-    }
-    if (song.src) URL.revokeObjectURL(song.src)
-    setMessage(`Eliminada: ${song.title}`)
-    refresh()
-  }
-
-  function moveSong(song: Song, offset: -1 | 1) {
-    if (playlist.move(song.id, offset)) refresh()
+    changed()
   }
 
   function seek(seconds: number) {
     setElapsed(seconds)
-    if (audioRef.current && current?.src) audioRef.current.currentTime = seconds
+    if (audioRef.current) audioRef.current.currentTime = seconds
   }
 
   function cycleRepeat() {
     playlist.repeat = NEXT_REPEAT[playlist.repeat]
-    setMessage(REPEAT_LABEL[playlist.repeat])
-    refresh()
+    setToast(
+      playlist.repeat === 'off'
+        ? 'Repetir desactivado'
+        : playlist.repeat === 'all'
+          ? 'Repetir toda la lista'
+          : 'Repetir esta canción',
+    )
+    changed()
+  }
+
+  // ---------- Lista doble ----------
+  function addTrack(track: Track, where: AddWhere) {
+    const song: Song = { ...track, id: newId() }
+    if (where === 'now' || where === 'next') playlist.addNext(song)
+    else playlist.add(song, where)
+
+    if (where === 'now') {
+      playlist.select(song.id)
+      restart()
+      setIsPlaying(true)
+    }
+    const label =
+      where === 'now'
+        ? 'Reproduciendo'
+        : where === 'next'
+          ? 'Sonará a continuación'
+          : where === 'start'
+            ? 'Agregada al inicio'
+            : where === 'end'
+              ? 'Agregada al final'
+              : `Agregada en la posición ${where + 1}`
+    setToast(`${label}: ${track.title}`)
+    changed()
+  }
+
+  function playSong(song: Song) {
+    if (song === current) return togglePlay()
+    playlist.select(song.id)
+    restart()
+    setIsPlaying(true)
+    changed()
+  }
+
+  function removeSong(song: Song) {
+    playlist.remove(song.id)
+    if (song === current) {
+      restart()
+      if (!playlist.current) setIsPlaying(false)
+    }
+    setToast(`Eliminada: ${song.title}`)
+    changed()
+  }
+
+  function moveSong(song: Song, offset: -1 | 1) {
+    if (playlist.move(song.id, offset)) changed()
   }
 
   function shuffle() {
     playlist.shuffle()
-    setMessage('Lista revuelta')
-    refresh()
+    setToast('Lista revuelta')
+    changed()
   }
 
   function reverse() {
     playlist.reverse()
-    setMessage('Orden invertido')
-    refresh()
+    setToast('Orden invertido')
+    changed()
   }
 
-  function onFileChange(selected: File | null) {
-    setFile(selected)
-    if (selected && !title) setTitle(selected.name.replace(/\.[^.]+$/, ''))
+  function clearQueue() {
+    if (!confirmClear) {
+      setConfirmClear(true)
+      setTimeout(() => setConfirmClear(false), 3000)
+      return
+    }
+    playlist.clear()
+    setIsPlaying(false)
+    restart()
+    setConfirmClear(false)
+    setToast('Lista vaciada')
+    changed()
   }
 
-  async function handleAdd(event: FormEvent) {
-    event.preventDefault()
-    setFormError(null)
-
-    const name = title.trim()
-    if (!name) return setFormError('Escribe el nombre de la canción')
-
-    const index = Number(positionText) - 1
-    if (where === 'index' && (!Number.isInteger(index) || index < 0 || index > playlist.size)) {
-      return setFormError(`La posición debe estar entre 1 y ${playlist.size + 1}`)
-    }
-    const position: Position = where === 'index' ? index : where
-
-    let duration = parseTime(durationText)
-    let src: string | undefined
-    if (file) {
-      src = URL.createObjectURL(file)
-      duration = (await readDuration(src)) ?? duration
-    }
-    if (!duration) {
-      if (src) URL.revokeObjectURL(src)
-      return setFormError('Duración inválida: usa minutos:segundos, por ejemplo 3:45')
-    }
-
-    const song: Song = {
-      id: newId(),
-      title: name,
-      artist: artist.trim() || 'Artista desconocido',
-      duration,
-      color: COLORS[Math.floor(Math.random() * COLORS.length)],
-      src,
-    }
-    playlist.add(song, position)
-
-    const label = where === 'start' ? 'al inicio' : where === 'end' ? 'al final' : `en la posición ${positionText}`
-    setMessage(`Agregada ${label}: ${song.title}`)
-    setTitle('')
-    setArtist('')
-    setFile(null)
-    if (fileInputRef.current) fileInputRef.current.value = ''
-    refresh()
+  function toggleLike(track: Track) {
+    setLiked((prev) => {
+      const next = { ...prev }
+      if (next[track.trackId]) delete next[track.trackId]
+      else next[track.trackId] = track
+      return next
+    })
   }
 
-  const search = query.trim().toLowerCase()
-  const rows = nodes
-    .map((node, index) => ({ node, index }))
-    .filter(({ node }) =>
-      !search || `${node.value.title} ${node.value.artist}`.toLowerCase().includes(search),
-    )
-  const progress = current ? Math.min(elapsed, current.duration) : 0
+  const likedTracks = Object.values(liked)
+  const listed = tab === 'search' ? results : likedTracks
 
   return (
     <div className="app">
-      <aside className="sidebar">
+      <header className="topbar">
         <div className="brand">
-          <span className="brand-icon">♫</span>
+          <span className="logo">♪</span>
           <div>
-            <strong>Reproductor Doble</strong>
-            <small>Listas doblemente enlazadas</small>
+            <strong>Sonora</strong>
+            <small>Reproductor con listas dobles</small>
           </div>
         </div>
-
-        <form className="card add-form" onSubmit={handleAdd}>
-          <h2>Agregar canción</h2>
-          <label>
-            Nombre
-            <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ej: Yellow" />
-          </label>
-          <label>
-            Artista
-            <input value={artist} onChange={(e) => setArtist(e.target.value)} placeholder="Ej: Coldplay" />
-          </label>
-          <label>
-            Duración (m:ss)
-            <input value={durationText} onChange={(e) => setDurationText(e.target.value)} disabled={!!file} />
-          </label>
-          <label>
-            Archivo de audio (opcional)
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="audio/*"
-              onChange={(e) => onFileChange(e.target.files?.[0] ?? null)}
-            />
-          </label>
-
-          <fieldset>
-            <legend>¿Dónde agregarla?</legend>
-            <div className="segmented">
-              {(['start', 'end', 'index'] as const).map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  className={where === option ? 'active' : ''}
-                  onClick={() => setWhere(option)}
-                >
-                  {option === 'start' ? 'Inicio' : option === 'end' ? 'Final' : 'Posición'}
-                </button>
-              ))}
-            </div>
-            {where === 'index' && (
-              <label>
-                Posición (1 a {playlist.size + 1})
-                <input
-                  type="number"
-                  min={1}
-                  max={playlist.size + 1}
-                  value={positionText}
-                  onChange={(e) => setPositionText(e.target.value)}
-                />
-              </label>
-            )}
-          </fieldset>
-
-          {formError && <p className="error">{formError}</p>}
-          <button type="submit" className="primary">+ Agregar</button>
-        </form>
-
-        <div className="card stats">
-          <h2>Resumen</h2>
-          <dl>
-            <dt>Canciones</dt>
-            <dd>{playlist.size}</dd>
-            <dt>Duración total</dt>
-            <dd>{formatTime(playlist.totalDuration())}</dd>
-            <dt>Head (primera)</dt>
-            <dd>{playlist.songs.head?.value.title ?? 'null'}</dd>
-            <dt>Tail (última)</dt>
-            <dd>{playlist.songs.tail?.value.title ?? 'null'}</dd>
-          </dl>
-        </div>
-      </aside>
-
-      <main className="main">
-        <header className="hero" style={{ '--cover': current?.color ?? '#333' } as CSSProperties}>
-          <div className="cover big">{current ? current.title.charAt(0) : '♪'}</div>
-          <div>
-            <small>Lista de reproducción</small>
-            <h1>Mi Playlist</h1>
-            <p>
-              {playlist.size} canciones · {formatTime(playlist.totalDuration())}
-            </p>
-          </div>
-        </header>
-
-        <div className="toolbar">
+        <label className="search-box">
+          <span aria-hidden>⌕</span>
           <input
-            className="search"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Buscar canción o artista…"
+            onChange={(e) => {
+              setQuery(e.target.value)
+              setTab('search')
+            }}
+            placeholder="¿Qué quieres escuchar? Canción, artista o álbum"
+            aria-label="Buscar música"
           />
-          <button onClick={shuffle} disabled={playlist.size < 2}>🔀 Revolver</button>
-          <button onClick={reverse} disabled={playlist.size < 2}>⇅ Invertir</button>
-        </div>
+          {query && (
+            <button type="button" className="icon-btn" onClick={() => setQuery('')} title="Borrar búsqueda">
+              ✕
+            </button>
+          )}
+        </label>
+      </header>
 
-        {playlist.size === 0 ? (
-          <p className="empty">La lista está vacía. Agrega una canción desde el panel izquierdo.</p>
-        ) : (
-          <ol className="tracks">
-            {rows.map(({ node, index }) => {
-              const song = node.value
-              const isCurrent = node === currentNode
-              return (
-                <li key={song.id} className={isCurrent ? 'current' : ''}>
-                  <button className="track-main" onClick={() => playSong(song)} title="Reproducir">
-                    <span className="num">{isCurrent && isPlaying ? '▶' : index + 1}</span>
-                    <span className="cover" style={{ background: song.color }}>{song.title.charAt(0)}</span>
-                    <span className="meta">
-                      <strong>{song.title}</strong>
-                      <small>
-                        {song.artist}
-                        {song.id.startsWith('u') && song.src && <em className="badge">tu archivo</em>}
-                      </small>
-                    </span>
-                    <span className="time">{formatTime(song.duration)}</span>
+      <main className="content">
+        <section className="panel browse">
+          <nav className="tabs">
+            <button className={tab === 'search' ? 'active' : ''} onClick={() => setTab('search')}>
+              Buscar
+            </button>
+            <button className={tab === 'liked' ? 'active' : ''} onClick={() => setTab('liked')}>
+              Favoritos {likedTracks.length > 0 && <span className="count">{likedTracks.length}</span>}
+            </button>
+          </nav>
+
+          {tab === 'search' && query.trim().length < 2 && (
+            <div className="welcome">
+              <h1>Encuentra tu música</h1>
+              <p className="muted">
+                Busca cualquier canción y agrégala a tu lista al inicio, al final o en la posición que quieras.
+              </p>
+              <div className="chips">
+                {SUGGESTIONS.map((term) => (
+                  <button key={term} className="chip" onClick={() => setQuery(term)}>
+                    {term}
                   </button>
-                  <div className="track-actions">
-                    <button onClick={() => moveSong(song, -1)} disabled={index === 0} title="Subir">↑</button>
-                    <button onClick={() => moveSong(song, 1)} disabled={index === playlist.size - 1} title="Bajar">↓</button>
-                    <button className="danger" onClick={() => removeSong(song)} title="Eliminar">✕</button>
-                  </div>
-                </li>
-              )
-            })}
-            {rows.length === 0 && <p className="empty">No hay canciones que coincidan con “{query}”.</p>}
-          </ol>
-        )}
+                ))}
+              </div>
+            </div>
+          )}
 
-        <section className="card memory">
-          <h2>Así está la lista doble en memoria</h2>
-          <p className="hint">
-            Cada nodo apunta a su anterior (<code>prev</code>) y a su siguiente (<code>next</code>).
-            Adelantar sigue <code>next</code>; retroceder sigue <code>prev</code>.
-          </p>
-          <div className="chain">
-            <span className="null">null</span>
-            {nodes.map((node, index) => (
-              <Fragment key={node.value.id}>
-                <span className="arrow">{index === 0 ? '←' : '⇄'}</span>
-                <div className={`node${node === currentNode ? ' is-current' : ''}`}>
-                  <div className="tags">
-                    {node === playlist.songs.head && <span>HEAD</span>}
-                    {node === playlist.songs.tail && <span>TAIL</span>}
-                    {node === currentNode && <span className="now">ACTUAL</span>}
-                  </div>
-                  <div className="ptr">prev: {node.prev?.value.title ?? 'null'}</div>
-                  <div className="val">{node.value.title}</div>
-                  <div className="ptr">next: {node.next?.value.title ?? 'null'}</div>
-                </div>
-              </Fragment>
-            ))}
-            {nodes.length > 0 && <span className="arrow">→</span>}
-            {nodes.length > 0 && <span className="null">null</span>}
-          </div>
-          <p className="hint">
-            <strong>Recorrido head → tail:</strong> {playlist.songs.toArray().map((s) => s.title).join(' → ') || '—'}
-            <br />
-            <strong>Recorrido tail → head:</strong>{' '}
-            {playlist.songs.toArrayReverse().map((s) => s.title).join(' → ') || '—'}
-          </p>
+          {tab === 'search' && loading && <p className="muted pad">Buscando “{query.trim()}”…</p>}
+          {tab === 'search' && searchError && <p className="error pad">{searchError}</p>}
+          {tab === 'search' && !loading && !searchError && query.trim().length >= 2 && results.length === 0 && (
+            <p className="muted pad">No encontramos canciones para “{query.trim()}”.</p>
+          )}
+          {tab === 'liked' && likedTracks.length === 0 && (
+            <p className="muted pad">Aún no tienes favoritos. Toca ♡ en cualquier canción.</p>
+          )}
+
+          {!(tab === 'search' && loading) && listed.length > 0 && (
+            <ul className="track-list">
+              {listed.map((track) => (
+                <TrackRow
+                  key={track.trackId}
+                  track={track}
+                  queueSize={playlist.size}
+                  liked={!!liked[track.trackId]}
+                  playing={current?.trackId === track.trackId}
+                  onAdd={(where) => addTrack(track, where)}
+                  onToggleLike={() => toggleLike(track)}
+                />
+              ))}
+            </ul>
+          )}
         </section>
+
+        <aside className="panel queue">
+          <div className="queue-head">
+            <div>
+              <h2>Tu lista</h2>
+              <small className="muted">
+                {playlist.size} {playlist.size === 1 ? 'canción' : 'canciones'} · {formatTime(playlist.totalDuration())}
+              </small>
+            </div>
+            <div className="queue-tools">
+              <button onClick={shuffle} disabled={playlist.size < 2} title="Revolver">🔀</button>
+              <button onClick={reverse} disabled={playlist.size < 2} title="Invertir el orden">⇅</button>
+              <button onClick={clearQueue} disabled={playlist.size === 0} className={confirmClear ? 'danger' : ''}>
+                {confirmClear ? '¿Vaciar?' : 'Vaciar'}
+              </button>
+            </div>
+          </div>
+
+          {playlist.size === 0 ? (
+            <div className="queue-empty">
+              <span>♫</span>
+              <p>Tu lista está vacía</p>
+              <small className="muted">Busca una canción y toca ＋ para agregarla.</small>
+            </div>
+          ) : (
+            <ol className="queue-list">
+              {queue.map((node, index) => {
+                const song = node.value
+                const isCurrent = node === currentNode
+                return (
+                  <li key={song.id} className={isCurrent ? 'current' : ''}>
+                    <button className="queue-main" onClick={() => playSong(song)} title="Reproducir">
+                      <span className="num">
+                        {isCurrent && isPlaying ? (
+                          <span className="eq">
+                            <i />
+                            <i />
+                            <i />
+                          </span>
+                        ) : (
+                          index + 1
+                        )}
+                      </span>
+                      <img src={song.cover} alt="" loading="lazy" />
+                      <span className="track-meta">
+                        <strong>{song.title}</strong>
+                        <small>{song.artist}</small>
+                      </span>
+                    </button>
+                    <div className="queue-actions">
+                      <button onClick={() => moveSong(song, -1)} disabled={index === 0} title="Subir">↑</button>
+                      <button onClick={() => moveSong(song, 1)} disabled={index === playlist.size - 1} title="Bajar">
+                        ↓
+                      </button>
+                      <button className="remove" onClick={() => removeSong(song)} title="Eliminar">✕</button>
+                    </div>
+                  </li>
+                )
+              })}
+            </ol>
+          )}
+
+          <div className="structure">
+            <button className="link-btn" onClick={() => setShowDiagram((v) => !v)}>
+              {showDiagram ? '▾' : '▸'} Estructura: lista doblemente enlazada
+            </button>
+            {showDiagram && <ListDiagram playlist={playlist} />}
+          </div>
+        </aside>
       </main>
 
-      <footer className="player">
-        <div className="now-playing">
-          {current ? (
-            <>
-              <span className="cover" style={{ background: current.color }}>{current.title.charAt(0)}</span>
-              <span className="meta">
-                <strong>{current.title}</strong>
-                <small>{current.artist}</small>
-              </span>
-            </>
-          ) : (
-            <span className="meta"><small>Nada en reproducción</small></span>
-          )}
-        </div>
+      <PlayerBar
+        current={current}
+        isPlaying={isPlaying}
+        elapsed={elapsed}
+        duration={duration}
+        volume={volume}
+        repeat={playlist.repeat}
+        liked={!!(current && liked[current.trackId])}
+        hasSongs={playlist.size > 0}
+        onToggle={togglePlay}
+        onNext={goNext}
+        onPrevious={goPrevious}
+        onSeek={seek}
+        onVolume={setVolume}
+        onShuffle={shuffle}
+        onRepeat={cycleRepeat}
+        onToggleLike={() => current && toggleLike(current)}
+      />
 
-        <div className="controls">
-          <div className="buttons">
-            <button onClick={shuffle} disabled={playlist.size < 2} title="Revolver">🔀</button>
-            <button onClick={goPrevious} disabled={!current} title="Retroceder">⏮</button>
-            <button className="play" onClick={togglePlay} disabled={!current} title={isPlaying ? 'Pausar' : 'Reproducir'}>
-              {isPlaying ? '⏸' : '▶'}
-            </button>
-            <button onClick={goNext} disabled={!current} title="Adelantar">⏭</button>
-            <button
-              onClick={cycleRepeat}
-              className={playlist.repeat !== 'off' ? 'on' : ''}
-              title={REPEAT_LABEL[playlist.repeat]}
-            >
-              {playlist.repeat === 'one' ? '🔂' : '🔁'}
-            </button>
-          </div>
-          <div className="progress">
-            <span>{formatTime(progress)}</span>
-            <input
-              type="range"
-              min={0}
-              max={current?.duration ?? 0}
-              value={progress}
-              onChange={(e) => seek(Number(e.target.value))}
-              disabled={!current}
-              aria-label="Progreso"
-            />
-            <span>{formatTime(current?.duration ?? 0)}</span>
-          </div>
+      {toast && (
+        <div className="toast" role="status">
+          {toast}
         </div>
-
-        <div className="extra">
-          <small>{REPEAT_LABEL[playlist.repeat]}</small>
-          {current && !current.src && (
-            <button onClick={() => setSpeed((s) => (s === 1 ? 10 : 1))} title="Velocidad de la simulación">
-              x{speed}
-            </button>
-          )}
-        </div>
-      </footer>
-
-      {message && <div className="toast">{message}</div>}
+      )}
       <audio
         ref={audioRef}
-        onTimeUpdate={(e) => setElapsed(Math.floor(e.currentTarget.currentTime))}
-        onEnded={handleEnd}
+        onTimeUpdate={(e) => setElapsed(e.currentTarget.currentTime)}
+        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+        onEnded={handleEnded}
+        onError={() => current && setToast('No se pudo cargar el audio de esta canción')}
       />
     </div>
   )

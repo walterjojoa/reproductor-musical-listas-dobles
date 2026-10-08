@@ -1,15 +1,21 @@
 import { DoublyLinkedList, ListNode } from './DoublyLinkedList'
 
-export interface Song {
-  id: string
+/** Canción encontrada en el buscador. */
+export interface Track {
+  trackId: string
   title: string
   artist: string
-  /** Duración en segundos. */
+  album: string
+  cover: string
+  /** Duración de la canción completa, en segundos. */
   duration: number
-  /** Color de la portada. */
-  color: string
-  /** URL de audio (archivos que sube el usuario). Sin ella, la reproducción se simula. */
-  src?: string
+  /** Audio de vista previa (30 s). */
+  previewUrl: string
+}
+
+/** Canción dentro de la lista; `id` es único aunque la misma canción se agregue dos veces. */
+export interface Song extends Track {
+  id: string
 }
 
 export type RepeatMode = 'off' | 'all' | 'one'
@@ -35,6 +41,17 @@ export class Playlist {
           : this.songs.insertAt(position, song)
     this.current ??= node
     return node
+  }
+
+  /** "Reproducir a continuación": inserta justo después de la canción actual. */
+  addNext(song: Song): ListNode<Song> {
+    const index = this.current ? this.songs.indexOfNode(this.current) + 1 : 0
+    return this.add(song, index)
+  }
+
+  clear(): void {
+    this.songs.clear()
+    this.current = null
   }
 
   remove(id: string): Song | null {

@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { Playlist, type Song } from './Playlist'
 
-const song = (id: string): Song => ({ id, title: id, artist: 'X', duration: 60, color: '#000' })
+const song = (id: string): Song => ({
+  id,
+  trackId: id,
+  title: id,
+  artist: 'X',
+  album: 'Y',
+  cover: '',
+  duration: 60,
+  previewUrl: '',
+})
 
 function playlistOf(...ids: string[]) {
   const playlist = new Playlist()
@@ -23,6 +32,16 @@ describe('Playlist', () => {
     playlist.add(song('D'), 'end')
     playlist.add(song('C'), 2)
     expect(titles(playlist)).toEqual(['A', 'B', 'C', 'D'])
+  })
+
+  it('reproducir a continuación inserta después de la actual', () => {
+    const playlist = playlistOf('A', 'B', 'C')
+    playlist.select('B')
+    playlist.addNext(song('X'))
+    expect(titles(playlist)).toEqual(['A', 'B', 'X', 'C'])
+    const empty = new Playlist()
+    empty.addNext(song('Y'))
+    expect(titles(empty)).toEqual(['Y'])
   })
 
   it('adelanta y retrocede siguiendo next y prev', () => {
