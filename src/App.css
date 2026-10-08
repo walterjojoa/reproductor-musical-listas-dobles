@@ -251,7 +251,8 @@ p {
   background: var(--border);
 }
 
-.track-play img {
+.track-play img,
+.track-play .cover-placeholder {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -481,7 +482,7 @@ p {
   padding: 0.45rem;
 }
 
-.queue-main img {
+.queue-cover {
   width: 40px;
   height: 40px;
   border-radius: 6px;
@@ -662,7 +663,7 @@ p {
   min-width: 0;
 }
 
-.player-song img {
+.player-cover {
   width: 58px;
   height: 58px;
   border-radius: 8px;
@@ -781,4 +782,74 @@ p {
   .track-time {
     display: none;
   }
+}
+
+/* ---------- Portada vacía (canciones subidas) ---------- */
+.cover-placeholder {
+  display: grid;
+  place-items: center;
+  flex: none;
+  background: linear-gradient(135deg, var(--accent), #9b6cf0);
+  color: #fff;
+  font-size: 1.2rem;
+}
+
+.queue-cover,
+.player-cover {
+  flex: none;
+}
+
+/* ---------- Subir MP3 ---------- */
+.dropzone {
+  margin: 1rem 1.25rem;
+  padding: 2rem 1.25rem;
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  text-align: center;
+  background: var(--surface-2);
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.dropzone.dragging {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.dropzone-icon {
+  display: block;
+  font-size: 2.2rem;
+  color: var(--accent);
+}
+
+.dropzone p {
+  margin: 0.4rem 0;
+}
+
+.dropzone-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.primary-btn,
+.secondary-btn {
+  padding: 0.6rem 1.2rem;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.primary-btn {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.secondary-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.secondary-btn:hover {
+  border-color: var(--text);
 }

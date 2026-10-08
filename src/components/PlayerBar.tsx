@@ -1,5 +1,7 @@
 import type { RepeatMode, Song } from '../lib/Playlist'
+import { isLocalTrack } from '../lib/localFiles'
 import { formatTime } from '../lib/time'
+import { Cover } from './Cover'
 
 const REPEAT_LABEL: Record<RepeatMode, string> = {
   off: 'Repetir: desactivado',
@@ -35,7 +37,7 @@ export function PlayerBar(props: Props) {
       <div className="player-song">
         {current ? (
           <>
-            <img src={current.cover} alt="" />
+            <Cover src={current.cover} className="player-cover" />
             <div className="track-meta">
               <strong>{current.title}</strong>
               <small>{current.artist}</small>
@@ -97,7 +99,7 @@ export function PlayerBar(props: Props) {
       </div>
 
       <div className="player-right">
-        <small className="muted">{current ? 'Vista previa' : ''}</small>
+        <small className="muted">{current ? (isLocalTrack(current) ? 'Canción completa' : 'Vista previa 30 s') : ''}</small>
         <span aria-hidden>{volume === 0 ? '🔇' : '🔊'}</span>
         <input
           type="range"

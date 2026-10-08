@@ -20,7 +20,8 @@ está construida sobre una lista doble hecha a mano.
 
 ### Otras funcionalidades
 
-- **Buscador de música real** (API pública de iTunes): canciones, artistas y álbumes con portada. Cada canción suena con su vista previa de 30 segundos.
+- **Buscador de música real** (API pública de iTunes): canciones, artistas y álbumes con portada. Suenan con la vista previa de 30 segundos que permite iTunes.
+- **Tus MP3 completos**: en la pestaña *Tus MP3* arrastras o eliges canciones de tu PC y suenan completas. Entran a la misma lista doble (inicio, final o posición). No se suben a ningún servidor; solo existen mientras la página está abierta.
 - **Reproducir ahora** y **Reproducir a continuación** (inserta justo después del nodo actual).
 - **Play / pausa**, barra de progreso, volumen y paso automático a la siguiente canción.
 - **Repetir**: desactivado, toda la lista (recorrido circular: del `tail` vuelve al `head` y viceversa) o una canción.

@@ -1,5 +1,6 @@
 import type { Track } from '../lib/Playlist'
 import { formatTime } from '../lib/time'
+import { Cover } from './Cover'
 import { AddMenu, type AddWhere } from './AddMenu'
 
 interface Props {
@@ -16,7 +17,7 @@ export function TrackRow({ track, queueSize, liked, playing, onAdd, onToggleLike
   return (
     <li className={`track-row${playing ? ' playing' : ''}`}>
       <button className="track-play" onClick={() => onAdd('now')} title="Reproducir ahora">
-        <img src={track.cover} alt="" loading="lazy" />
+        <Cover src={track.cover} />
         <span className="play-overlay">▶</span>
       </button>
       <div className="track-meta">

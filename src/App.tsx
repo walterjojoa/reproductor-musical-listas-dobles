@@ -1,9 +1,11 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import type { AddWhere } from './components/AddMenu'
+import { Cover } from './components/Cover'
 import { ListDiagram } from './components/ListDiagram'
 import { PlayerBar } from './components/PlayerBar'
 import { TrackRow } from './components/TrackRow'
 import { searchTracks } from './lib/itunes'
+import { fileToTrack, isLocalTrack } from './lib/localFiles'
 import { Playlist, type RepeatMode, type Song, type Track } from './lib/Playlist'
 import { load, save } from './lib/storage'
 import { formatTime } from './lib/time'
@@ -35,7 +37,7 @@ function restorePlaylist(): Playlist {
   return playlist
 }
 
-type Tab = 'search' | 'liked'
+type Tab = 'search' | 'files' | 'liked'
 
 export default function App() {
   // La lista doble vive fuera del estado de React; `changed` vuelve a pintar y guarda.
@@ -49,6 +51,10 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
   const [liked, setLiked] = useState<Record<string, Track>>(() => load(LIKED_KEY, {}))
+  const [uploads, setUploads] = useState<Track[]>([])
+  const [uploading, setUploading] = useState(false)
+  const [dragging, setDragging] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const [isPlaying, setIsPlaying] = useState(false)
   const [elapsed, setElapsed] = useState(0)
@@ -64,15 +70,20 @@ export default function App() {
   const queue = [...playlist.songs.nodes()]
 
   // ---------- Guardado ----------
+  // Las canciones subidas no se guardan: su audio solo existe mientras la página está abierta.
   useEffect(() => {
+    const currentSong = playlist.current?.value
     save(QUEUE_KEY, {
-      songs: playlist.songs.toArray(),
-      currentId: playlist.current?.value.id ?? null,
+      songs: playlist.songs.toArray().filter((song) => !isLocalTrack(song)),
+      currentId: currentSong && !isLocalTrack(currentSong) ? currentSong.id : null,
       repeat: playlist.repeat,
     } satisfies SavedQueue)
   }, [version, playlist])
 
-  useEffect(() => save(LIKED_KEY, liked), [liked])
+  useEffect(
+    () => save(LIKED_KEY, Object.fromEntries(Object.entries(liked).filter(([, track]) => !isLocalTrack(track)))),
+    [liked],
+  )
 
   useEffect(() => {
     save(VOLUME_KEY, volume)
@@ -136,7 +147,7 @@ export default function App() {
       title: current.title,
       artist: current.artist,
       album: current.album,
-      artwork: [{ src: current.cover, sizes: '300x300', type: 'image/jpeg' }],
+      artwork: current.cover ? [{ src: current.cover, sizes: '300x300', type: 'image/jpeg' }] : [],
     })
   }, [current])
 
@@ -302,6 +313,26 @@ export default function App() {
     changed()
   }
 
+  // ---------- Canciones subidas desde el PC ----------
+  async function uploadFiles(files: FileList | File[]) {
+    const audioFiles = [...files].filter((file) => file.type.startsWith('audio/') || /\.(mp3|m4a|wav|ogg|flac|aac)$/i.test(file.name))
+    if (audioFiles.length === 0) {
+      setToast('Elige archivos de audio (mp3, m4a, wav…)')
+      return
+    }
+    setUploading(true)
+    const tracks = await Promise.all(audioFiles.map(fileToTrack))
+    setUploads((prev) => [...prev, ...tracks])
+    setUploading(false)
+    setToast(tracks.length === 1 ? `Subida: ${tracks[0].title}` : `${tracks.length} canciones subidas`)
+  }
+
+  function addAllUploads() {
+    for (const track of uploads) playlist.add({ ...track, id: newId() }, 'end')
+    setToast(`${uploads.length} canciones agregadas al final`)
+    changed()
+  }
+
   function toggleLike(track: Track) {
     setLiked((prev) => {
       const next = { ...prev }
@@ -312,7 +343,7 @@ export default function App() {
   }
 
   const likedTracks = Object.values(liked)
-  const listed = tab === 'search' ? results : likedTracks
+  const listed = tab === 'search' ? results : tab === 'files' ? uploads : likedTracks
 
   return (
     <div className="app">
@@ -349,6 +380,9 @@ export default function App() {
             <button className={tab === 'search' ? 'active' : ''} onClick={() => setTab('search')}>
               Buscar
             </button>
+            <button className={tab === 'files' ? 'active' : ''} onClick={() => setTab('files')}>
+              Tus MP3 {uploads.length > 0 && <span className="count">{uploads.length}</span>}
+            </button>
             <button className={tab === 'liked' ? 'active' : ''} onClick={() => setTab('liked')}>
               Favoritos {likedTracks.length > 0 && <span className="count">{likedTracks.length}</span>}
             </button>
@@ -375,6 +409,51 @@ export default function App() {
           {tab === 'search' && !loading && !searchError && query.trim().length >= 2 && results.length === 0 && (
             <p className="muted pad">No encontramos canciones para “{query.trim()}”.</p>
           )}
+          {tab === 'files' && (
+            <div
+              className={`dropzone${dragging ? ' dragging' : ''}`}
+              onDragOver={(e) => {
+                e.preventDefault()
+                setDragging(true)
+              }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={(e) => {
+                e.preventDefault()
+                setDragging(false)
+                uploadFiles(e.dataTransfer.files)
+              }}
+            >
+              <span className="dropzone-icon">⇪</span>
+              <p>
+                <strong>Arrastra aquí tus canciones</strong> o elígelas desde tu PC
+              </p>
+              <small className="muted">
+                Suenan completas. Tip: si el archivo se llama “Artista - Canción.mp3”, se separa el artista solo.
+              </small>
+              <div className="dropzone-actions">
+                <button className="primary-btn" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
+                  {uploading ? 'Cargando…' : 'Elegir archivos'}
+                </button>
+                {uploads.length > 0 && (
+                  <button className="secondary-btn" onClick={addAllUploads}>
+                    Agregar todas al final
+                  </button>
+                )}
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="audio/*"
+                multiple
+                hidden
+                onChange={(e) => {
+                  if (e.target.files) uploadFiles(e.target.files)
+                  e.target.value = ''
+                }}
+              />
+            </div>
+          )}
+
           {tab === 'liked' && likedTracks.length === 0 && (
             <p className="muted pad">Aún no tienes favoritos. Toca ♡ en cualquier canción.</p>
           )}
@@ -438,7 +517,7 @@ export default function App() {
                           index + 1
                         )}
                       </span>
-                      <img src={song.cover} alt="" loading="lazy" />
+                      <Cover src={song.cover} className="queue-cover" />
                       <span className="track-meta">
                         <strong>{song.title}</strong>
                         <small>{song.artist}</small>
