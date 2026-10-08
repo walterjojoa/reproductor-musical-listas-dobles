@@ -20,7 +20,7 @@ con frontend en React donde el usuario agrega, elimina, adelanta y retrocede can
 ### Funcionalidades adicionales
 
 - **Reproducción**: play/pausa, barra de progreso y paso automático a la siguiente canción al terminar.
-- **Audio real**: puedes subir un archivo de audio (mp3, wav…) y se reproduce de verdad; las canciones de ejemplo se simulan (con velocidad x1 o x10 para probar rápido).
+- **Audio real**: las canciones de ejemplo son melodías de dominio público (Himno de la Alegría, Para Elisa, Estrellita…) que la app genera como audio WAV al iniciar (`src/lib/synth.ts`), así que suenan sin incluir música con derechos de autor. También puedes subir tu propio archivo de audio (mp3, wav…).
 - **Repetir**: sin repetir, repetir lista (la lista se recorre de forma circular: del final vuelve al inicio y viceversa) o repetir canción.
 - **Mover** canciones arriba/abajo reenlazando el mismo nodo.
 - **Revolver** (Fisher-Yates reenlazando los nodos) e **invertir** la lista intercambiando `prev` y `next`.

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useReducer, useRef, useState, type CSSProperties, type FormEvent } from 'react'
-import { sampleSongs } from './data/sampleSongs'
+import { createSampleSongs } from './data/sampleSongs'
 import { Playlist, type Position, type RepeatMode, type Song } from './lib/Playlist'
 import { formatTime, parseTime } from './lib/time'
 
@@ -16,7 +16,7 @@ const newId = () => `u${Date.now().toString(36)}${idCounter++}`
 
 function createPlaylist(): Playlist {
   const playlist = new Playlist()
-  for (const song of sampleSongs) playlist.add({ ...song }, 'end')
+  for (const song of createSampleSongs()) playlist.add(song, 'end')
   return playlist
 }
 
@@ -362,7 +362,7 @@ export default function App() {
                       <strong>{song.title}</strong>
                       <small>
                         {song.artist}
-                        {song.src && <em className="badge">audio real</em>}
+                        {song.id.startsWith('u') && song.src && <em className="badge">tu archivo</em>}
                       </small>
                     </span>
                     <span className="time">{formatTime(song.duration)}</span>
