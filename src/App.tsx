@@ -210,7 +210,7 @@ export default function App() {
       ytRef.current?.stopVideo()
       setEngine('audio')
       if (audio.src !== current.previewUrl) audio.src = current.previewUrl
-      if (isPlayingRef.current) audio.play().catch(() => setIsPlaying(false))
+      if (isPlayingRef.current) playAudio()
       return
     }
 
@@ -247,7 +247,8 @@ export default function App() {
       if (isPlaying) ytRef.current?.playVideo()
       else ytRef.current?.pauseVideo()
     } else if (isPlaying) {
-      audio.play().catch(() => setIsPlaying(false))
+      // Si la canción va a sonar por YouTube, el audio todavía no tiene su src: no hay nada que reproducir.
+      if (audio.src === current.previewUrl) playAudio()
     } else {
       audio.pause()
     }
@@ -266,6 +267,13 @@ export default function App() {
     return () => clearInterval(timer)
   }, [engine])
 
+  /** Solo se pausa la app si el navegador bloquea el audio; una pausa por cambio de canción no es error. */
+  function playAudio() {
+    audioRef.current?.play().catch((error: DOMException) => {
+      if (error.name === 'NotAllowedError') setIsPlaying(false)
+    })
+  }
+
   /** Si YouTube falla, suena la vista previa de 30 s de iTunes. */
   function fallbackToPreview(reason: string) {
     const audio = audioRef.current
@@ -273,7 +281,7 @@ export default function App() {
     ytRef.current?.stopVideo()
     setEngine('audio')
     if (audio.src !== current.previewUrl) audio.src = current.previewUrl
-    if (isPlayingRef.current) audio.play().catch(() => setIsPlaying(false))
+    if (isPlayingRef.current) playAudio()
     setToast(`${reason}: suena la vista previa`)
   }
 
@@ -360,7 +368,7 @@ export default function App() {
       // La misma canción otra vez (repetir canción o lista de una sola): hay que darle play.
       if (playlist.current === before) {
         if (engine === 'youtube') ytRef.current?.playVideo()
-        else audioRef.current?.play().catch(() => setIsPlaying(false))
+        else playAudio()
       }
     }
     changed()
